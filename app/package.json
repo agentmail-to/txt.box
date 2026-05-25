@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@s2-dev/streamstore": "^0.22.8",
     "yjs": "^13.6.0"
   },
   "devDependencies": {

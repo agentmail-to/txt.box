@@ -1,4 +1,9 @@
-import { S2 } from "@s2-dev/streamstore";
+import {
+  S2,
+  AppendInput,
+  AppendRecord,
+  RangeNotSatisfiableError,
+} from "@s2-dev/streamstore";
 import {
   STREAM_NAME_PREFIX,
   DOC_ID_PATTERN,
@@ -14,15 +19,18 @@ interface Env {
   R2_PUBLIC_BASE: string;
   SNAPSHOTS_BUCKET: R2Bucket;
   SESSION_LIMITER: RateLimit;
+  APPEND_LIMITER: RateLimit;
+  READ_LIMITER: RateLimit;
 }
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-const TOKEN_TTL_SECONDS = 3600;
+const READ_WAIT_SECONDS = 30;
+const READ_LIMIT_COUNT = 1000;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -36,53 +44,30 @@ export default {
       return handleSession(request, env);
     }
 
+    if (url.pathname === "/append" && request.method === "POST") {
+      return handleAppend(request, env);
+    }
+
+    if (url.pathname === "/read" && request.method === "GET") {
+      return handleRead(request, env);
+    }
+
     return json({ error: "not found" }, 404);
   },
 };
 
 async function handleSession(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const docId = url.searchParams.get("doc");
+  const docId = parseDocId(url);
+  if (docId instanceof Response) return docId;
 
-  if (
-    !docId ||
-    docId.length === 0 ||
-    docId.length > DOC_ID_MAX_LENGTH ||
-    !DOC_ID_PATTERN.test(docId)
-  ) {
-    return json({ error: "invalid doc id" }, 400);
-  }
-
-  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
-  const { success } = await env.SESSION_LIMITER.limit({
-    key: `${ip}:${docId}`,
-  });
-  if (!success) {
-    return json({ error: "rate limited" }, 429);
-  }
-
-  const s2 = new S2({ accessToken: env.S2_ACCESS_TOKEN });
-  const streamName = `${STREAM_NAME_PREFIX}${docId}`;
-
-  const expiresAt = new Date(Date.now() + TOKEN_TTL_SECONDS * 1000);
-  const tokenId = `session/${docId}/${Date.now()}`;
-  const { accessToken: s2Token } = await s2.accessTokens.issue({
-    id: tokenId,
-    expiresAt,
-    scope: {
-      basins: { exact: env.S2_BASIN },
-      streams: { exact: streamName },
-      ops: ["read", "append", "check-tail"],
-    },
-  });
+  const limited = await rateLimit(request, env.SESSION_LIMITER, "session", docId);
+  if (limited) return limited;
 
   const snapshot = await findLatestSnapshot(docId, env);
 
   return json({
     docId,
-    stream: streamName,
-    s2Basin: env.S2_BASIN,
-    s2Token,
     snapshotUrl: snapshot.url,
     snapshotSeqNum: snapshot.seqNum,
     limits: {
@@ -90,6 +75,93 @@ async function handleSession(request: Request, env: Env): Promise<Response> {
       maxOpsPerSec: MAX_OPS_PER_SEC,
     },
   });
+}
+
+async function handleAppend(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const docId = parseDocId(url);
+  if (docId instanceof Response) return docId;
+
+  const limited = await rateLimit(request, env.APPEND_LIMITER, "append", docId);
+  if (limited) return limited;
+
+  const body = new Uint8Array(await request.arrayBuffer());
+  if (body.byteLength === 0) {
+    return json({ error: "empty record" }, 400);
+  }
+
+  if (body.byteLength > MAX_RECORD_BYTES) {
+    return json({ error: "record too large" }, 413);
+  }
+
+  const stream = streamForDoc(env, docId);
+  try {
+    const ack = await stream.append(
+      AppendInput.create([AppendRecord.bytes({ body })]),
+      { signal: request.signal },
+    );
+
+    return json({
+      startSeqNum: ack.start.seqNum,
+      endSeqNum: ack.end.seqNum,
+      nextSeqNum: ack.end.seqNum,
+    });
+  } finally {
+    await stream.close().catch(() => {});
+  }
+}
+
+async function handleRead(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const docId = parseDocId(url);
+  if (docId instanceof Response) return docId;
+
+  const seqParam = url.searchParams.get("seq") ?? "0";
+  const seqNum = Number(seqParam);
+  if (!Number.isSafeInteger(seqNum) || seqNum < 0) {
+    return json({ error: "invalid seq" }, 400);
+  }
+
+  const limited = await rateLimit(request, env.READ_LIMITER, "read", docId);
+  if (limited) return limited;
+
+  const stream = streamForDoc(env, docId);
+  try {
+    const batch = await stream.read(
+      {
+        start: { from: { seqNum }, clamp: true },
+        stop: {
+          limits: { count: READ_LIMIT_COUNT },
+          waitSecs: READ_WAIT_SECONDS,
+        },
+      },
+      { as: "bytes", signal: request.signal },
+    );
+
+    const nextSeqNum =
+      batch.records.length > 0
+        ? batch.records[batch.records.length - 1].seqNum + 1
+        : batch.tail?.seqNum ?? seqNum;
+
+    return json({
+      records: batch.records.map((record) => ({
+        seqNum: record.seqNum,
+        body: bytesToBase64(record.body),
+      })),
+      nextSeqNum,
+    });
+  } catch (err) {
+    if (err instanceof RangeNotSatisfiableError) {
+      return json({
+        records: [],
+        nextSeqNum: err.tail?.seq_num ?? seqNum,
+        reset: true,
+      });
+    }
+    throw err;
+  } finally {
+    await stream.close().catch(() => {});
+  }
 }
 
 async function findLatestSnapshot(
@@ -105,6 +177,54 @@ async function findLatestSnapshot(
     url: `${env.R2_PUBLIC_BASE}/${key}`,
     seqNum,
   };
+}
+
+function streamForDoc(env: Env, docId: string) {
+  const s2 = new S2({ accessToken: env.S2_ACCESS_TOKEN });
+  return s2.basin(env.S2_BASIN).stream(`${STREAM_NAME_PREFIX}${docId}`);
+}
+
+function parseDocId(url: URL): string | Response {
+  const docId = url.searchParams.get("doc");
+
+  if (
+    !docId ||
+    docId.length === 0 ||
+    docId.length > DOC_ID_MAX_LENGTH ||
+    !DOC_ID_PATTERN.test(docId)
+  ) {
+    return json({ error: "invalid doc id" }, 400);
+  }
+
+  return docId;
+}
+
+async function rateLimit(
+  request: Request,
+  limiter: RateLimit,
+  operation: string,
+  docId: string,
+): Promise<Response | null> {
+  const { success } = await limiter.limit({
+    key: `${operation}:${clientIp(request)}:${docId}`,
+  });
+  return success ? null : json({ error: "rate limited" }, 429);
+}
+
+function clientIp(request: Request): string {
+  return (
+    request.headers.get("cf-connecting-ip") ??
+    request.headers.get("x-forwarded-for")?.split(",", 1)[0]?.trim() ??
+    "unknown"
+  );
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
 }
 
 function json(data: unknown, status = 200): Response {

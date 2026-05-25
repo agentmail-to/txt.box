@@ -1,14 +1,7 @@
 import * as Y from "yjs";
-import {
-  S2,
-  AppendRecord,
-  BatchTransform,
-  Producer,
-  RangeNotSatisfiableError,
-} from "@s2-dev/streamstore";
-import type { ReadSession } from "@s2-dev/streamstore";
 import type { SessionResponse } from "../../shared/types";
 import { FLUSH_DEBOUNCE_MS, MAX_DOC_BYTES } from "../../shared/constants";
+import { appendUpdate, readUpdates } from "./api";
 
 export interface SyncState {
   doc: Y.Doc;
@@ -26,9 +19,6 @@ export async function startSync(
   const doc = new Y.Doc();
   const text = doc.getText("content");
 
-  const s2 = new S2({ accessToken: session.s2Token });
-  const stream = s2.basin(session.s2Basin).stream(session.stream);
-
   if (session.snapshotUrl) {
     const res = await fetch(session.snapshotUrl);
     if (res.ok) {
@@ -39,31 +29,18 @@ export async function startSync(
     }
   }
 
-  const appendSess = await stream.appendSession();
-  const producer = new Producer(
-    new BatchTransform({ lingerDurationMillis: FLUSH_DEBOUNCE_MS }),
-    appendSess
-  );
-
   let suppressLocal = false;
   let docTooLarge = false;
-  let pendingCount = 0;
+  let destroyed = false;
+  let appendInFlight = false;
+  let flushTimer: number | null = null;
+  let pendingUpdates: Uint8Array[] = [];
 
-  doc.on("update", async (update: Uint8Array, origin: unknown) => {
+  doc.on("update", (update: Uint8Array, origin: unknown) => {
     if (origin === "remote" || docTooLarge) return;
-    pendingCount++;
+    pendingUpdates.push(update);
     onStatus("Saving...");
-    try {
-      const ticket = await producer.submit(
-        AppendRecord.bytes({ body: update })
-      );
-      await ticket.ack();
-    } catch {
-      onStatus("Offline");
-      return;
-    }
-    pendingCount--;
-    if (pendingCount === 0) onStatus("Saved");
+    scheduleFlush();
   });
 
   text.observe(() => {
@@ -100,32 +77,43 @@ export async function startSync(
   textarea.selectionStart = textarea.selectionEnd = 0;
   onTextChange(text.toString());
 
-  let readSess: ReadSession<"bytes"> | null = null;
   let tailActive = true;
+  let readAbortController: AbortController | null = null;
   let nextReadSeqNum = session.snapshotSeqNum;
 
   const startTail = async () => {
     while (tailActive) {
       try {
-        readSess = await stream.readSession(
-          {
-            start: { from: { seqNum: nextReadSeqNum }, clamp: true },
-            stop: { waitSecs: 30 },
-          },
-          { as: "bytes" }
+        readAbortController = new AbortController();
+        const batch = await readUpdates(
+          session.docId,
+          nextReadSeqNum,
+          readAbortController.signal,
         );
-        for await (const rec of readSess) {
-          if (!tailActive) break;
-          nextReadSeqNum = rec.seqNum + 1;
-          applyRecord(doc, rec.body);
-        }
-      } catch (e) {
-        if (!tailActive) break;
-        if (e instanceof RangeNotSatisfiableError) {
-          console.warn("read position trimmed, restarting from tail");
-          nextReadSeqNum = 0;
+        readAbortController = null;
+
+        if (batch.reset) {
+          console.warn("read position trimmed, restarting from stream tail");
+          const previousSeqNum = nextReadSeqNum;
+          nextReadSeqNum = batch.nextSeqNum;
+          if (nextReadSeqNum === previousSeqNum) {
+            await new Promise((r) => setTimeout(r, 2000));
+          }
           continue;
         }
+
+        for (const rec of batch.records) {
+          if (!tailActive) break;
+          nextReadSeqNum = rec.seqNum + 1;
+          applyRecord(doc, base64ToBytes(rec.body));
+        }
+
+        if (batch.nextSeqNum > nextReadSeqNum) {
+          nextReadSeqNum = batch.nextSeqNum;
+        }
+      } catch (e) {
+        readAbortController = null;
+        if (!tailActive) break;
         console.error("read session error, retrying:", e);
         await new Promise((r) => setTimeout(r, 2000));
       }
@@ -149,13 +137,55 @@ export async function startSync(
     doc,
     text,
     destroy() {
+      destroyed = true;
       tailActive = false;
-      readSess?.cancel().catch(() => {});
-      producer.close().catch(() => {});
-      stream.close().catch(() => {});
+      if (flushTimer !== null) {
+        window.clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      readAbortController?.abort();
       doc.destroy();
     },
   };
+
+  function scheduleFlush(delay = FLUSH_DEBOUNCE_MS) {
+    if (destroyed || flushTimer !== null) return;
+    flushTimer = window.setTimeout(() => {
+      flushTimer = null;
+      void flushUpdates();
+    }, delay);
+  }
+
+  async function flushUpdates() {
+    if (destroyed || appendInFlight) return;
+    if (pendingUpdates.length === 0) {
+      onStatus("Saved");
+      return;
+    }
+
+    const updates = pendingUpdates;
+    pendingUpdates = [];
+    appendInFlight = true;
+
+    try {
+      const merged =
+        updates.length === 1 ? updates[0] : Y.mergeUpdates(updates);
+      await appendUpdate(session.docId, merged);
+    } catch {
+      pendingUpdates = [...updates, ...pendingUpdates];
+      onStatus("Offline");
+      scheduleFlush(2000);
+      return;
+    } finally {
+      appendInFlight = false;
+    }
+
+    if (pendingUpdates.length > 0) {
+      scheduleFlush();
+    } else {
+      onStatus("Saved");
+    }
+  }
 }
 
 function applyRecord(doc: Y.Doc, body: Uint8Array) {
@@ -168,6 +198,15 @@ function applyRecord(doc: Y.Doc, body: Uint8Array) {
     // binary Yjs update
   }
   Y.applyUpdate(doc, body, "remote");
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 function applyDiff(ytext: Y.Text, oldVal: string, newVal: string) {

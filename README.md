@@ -91,6 +91,7 @@ R2 buckets are auto-provisioned by wrangler on first deploy. Custom domains need
 ## Architecture
 
 - Every URL path on `txt.box` is a document: `txt.box/<docId>`
-- API lives on `api.txt.box/session` (single endpoint)
+- API lives on `api.txt.box` and proxies S2 operations server-side (`/session`, `/append`, `/read`)
+- The browser never receives S2 credentials; it sends Yjs updates to the API Worker
 - Each doc is an S2 stream (`doc:<docId>`) with Yjs update records
 - Snapshots are periodically written to R2 for fast load times

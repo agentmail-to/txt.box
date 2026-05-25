@@ -26,6 +26,22 @@ namespace_id = "2001"
   limit = 20
   period = 60
 
+[[env.dev.ratelimits]]
+name = "APPEND_LIMITER"
+namespace_id = "2002"
+
+  [env.dev.ratelimits.simple]
+  limit = 1200
+  period = 60
+
+[[env.dev.ratelimits]]
+name = "READ_LIMITER"
+namespace_id = "2003"
+
+  [env.dev.ratelimits.simple]
+  limit = 120
+  period = 60
+
 # --- Prod environment ---
 [env.prod]
 name = "txtbox-api-session-prod"
@@ -48,4 +64,20 @@ namespace_id = "1001"
 
   [env.prod.ratelimits.simple]
   limit = 20
+  period = 60
+
+[[env.prod.ratelimits]]
+name = "APPEND_LIMITER"
+namespace_id = "1002"
+
+  [env.prod.ratelimits.simple]
+  limit = 1200
+  period = 60
+
+[[env.prod.ratelimits]]
+name = "READ_LIMITER"
+namespace_id = "1003"
+
+  [env.prod.ratelimits.simple]
+  limit = 120
   period = 60

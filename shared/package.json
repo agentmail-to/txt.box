@@ -4,7 +4,7 @@
   "type": "module",
   "main": "index.ts",
   "types": "index.ts",
-  "dependencies": {
-    "@s2-dev/streamstore": "^0.22.8"
+  "devDependencies": {
+    "typescript": "^5.7.0"
   }
 }
