@@ -2,3 +2,15 @@ packages:
   - app
   - workers/*
   - shared
+
+allowBuilds:
+  # Required native runtime binaries used by Vite and Wrangler.
+  esbuild: true
+  workerd: true
+
+overrides:
+  picomatch: 4.0.4
+  rollup: 4.59.0
+  sharp: 0.35.0
+  undici: 7.28.0
+  ws: 8.21.0
