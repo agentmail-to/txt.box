@@ -9,8 +9,10 @@ allowBuilds:
   workerd: true
 
 overrides:
+  nanoid: 3.3.16
   picomatch: 4.0.4
+  postcss: 8.5.18
   rollup: 4.59.0
   sharp: 0.35.0
-  undici: 7.28.0
+  undici: 7.29.0
   ws: 8.21.0
