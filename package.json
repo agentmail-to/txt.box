@@ -1,5 +1,6 @@
 {
   "private": true,
+  "packageManager": "pnpm@11.13.0",
   "scripts": {
     "dev": "pnpm --parallel --filter './app' --filter './workers/*' dev",
     "dev:app": "pnpm --filter @txtbox/app dev",
