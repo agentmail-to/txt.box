@@ -5,13 +5,13 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  nanoid: 3.3.16
-  picomatch: 4.0.4
-  postcss: 8.5.18
-  rollup: 4.59.0
-  sharp: 0.35.0
-  undici: 7.29.0
-  ws: 8.21.0
+  nanoid: ^3.3.16
+  picomatch: ^4.0.4
+  postcss: ^8.5.26
+  rollup: ^4.59.0
+  sharp: ^0.35.0
+  undici: ^7.29.0
+  ws: ^8.21.0
 
 importers:
 
@@ -822,7 +822,7 @@ packages:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
     engines: {node: '>=12.0.0'}
     peerDependencies:
-      picomatch: 4.0.4
+      picomatch: ^4.0.4
     peerDependenciesMeta:
       picomatch:
         optional: true
@@ -870,8 +870,8 @@ packages:
     resolution: {integrity: sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A==}
     engines: {node: '>=12'}
 
-  postcss@8.5.18:
-    resolution: {integrity: sha512-xdB1oSLHbz1vRWgCDalrCqEFTWzFlhqFC5tIHLMOSUIjhm3XXQ1qrFy8S/ESr1JYRRXqM3c1QFiMZUJdUTqyMQ==}
+  postcss@8.5.26:
+    resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
     engines: {node: ^10 || ^12 || >=14}
 
   rollup@4.59.0:
@@ -1518,7 +1518,7 @@ snapshots:
 
   picomatch@4.0.4: {}
 
-  postcss@8.5.18:
+  postcss@8.5.26:
     dependencies:
       nanoid: 3.3.16
       picocolors: 1.1.1
@@ -1617,7 +1617,7 @@ snapshots:
       esbuild: 0.25.12
       fdir: 6.5.0(picomatch@4.0.4)
       picomatch: 4.0.4
-      postcss: 8.5.18
+      postcss: 8.5.26
       rollup: 4.59.0
       tinyglobby: 0.2.15
     optionalDependencies:
